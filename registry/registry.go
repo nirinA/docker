@@ -23,6 +23,9 @@ var (
 	ErrAlreadyExists         = errors.New("Image already exists")
 	ErrInvalidRepositoryName = errors.New("Invalid repository name (ex: \"registry.domain.tld/myrepos\")")
 	errLoginRequired         = errors.New("Authentication is required.")
+	validHex                 = regexp.MustCompile(`^([a-f0-9]{64})$`)
+	validNamespace           = regexp.MustCompile(`^([a-z0-9_]{4,30})$`)
+	validRepo                = regexp.MustCompile(`^([a-z0-9-_.]+)$`)
 )
 
 type TimeoutType uint32
@@ -105,22 +108,20 @@ func doRequest(req *http.Request, jar http.CookieJar, timeout TimeoutType) (*htt
 			data, err := ioutil.ReadFile(path.Join(hostDir, f.Name()))
 			if err != nil {
 				return nil, nil, err
-			} else {
-				pool.AppendCertsFromPEM(data)
 			}
+			pool.AppendCertsFromPEM(data)
 		}
 		if strings.HasSuffix(f.Name(), ".cert") {
 			certName := f.Name()
 			keyName := certName[:len(certName)-5] + ".key"
 			if !hasFile(fs, keyName) {
 				return nil, nil, fmt.Errorf("Missing key %s for certificate %s", keyName, certName)
-			} else {
-				cert, err := tls.LoadX509KeyPair(path.Join(hostDir, certName), path.Join(hostDir, keyName))
-				if err != nil {
-					return nil, nil, err
-				}
-				certs = append(certs, &cert)
 			}
+			cert, err := tls.LoadX509KeyPair(path.Join(hostDir, certName), path.Join(hostDir, keyName))
+			if err != nil {
+				return nil, nil, err
+			}
+			certs = append(certs, &cert)
 		}
 		if strings.HasSuffix(f.Name(), ".key") {
 			keyName := f.Name()
@@ -138,19 +139,13 @@ func doRequest(req *http.Request, jar http.CookieJar, timeout TimeoutType) (*htt
 			return nil, nil, err
 		}
 		return res, client, nil
-	} else {
-		for i, cert := range certs {
-			client := newClient(jar, pool, cert, timeout)
-			res, err := client.Do(req)
-			if i == len(certs)-1 {
-				// If this is the last cert, always return the result
-				return res, client, err
-			} else {
-				// Otherwise, continue to next cert if 403 or 5xx
-				if err == nil && res.StatusCode != 403 && !(res.StatusCode >= 500 && res.StatusCode < 600) {
-					return res, client, err
-				}
-			}
+	}
+	for i, cert := range certs {
+		client := newClient(jar, pool, cert, timeout)
+		res, err := client.Do(req)
+		// If this is the last cert, otherwise, continue to next cert if 403 or 5xx
+		if i == len(certs)-1 || err == nil && res.StatusCode != 403 && res.StatusCode < 500 {
+			return res, client, err
 		}
 	}
 
@@ -198,10 +193,7 @@ func pingRegistryEndpoint(endpoint string) (RegistryInfo, error) {
 
 	standalone := resp.Header.Get("X-Docker-Registry-Standalone")
 	log.Debugf("Registry standalone header: '%s'", standalone)
-	// Accepted values are "true" (case-insensitive) and "1".
-	if strings.EqualFold(standalone, "true") || standalone == "1" {
-		info.Standalone = true
-	} else if len(standalone) > 0 {
+	if !strings.EqualFold(standalone, "true") && standalone != "1" && len(standalone) > 0 {
 		// there is a header set, and it is not "true" or "1", so assume fails
 		info.Standalone = false
 	}
@@ -218,15 +210,17 @@ func validateRepositoryName(repositoryName string) error {
 	if len(nameParts) < 2 {
 		namespace = "library"
 		name = nameParts[0]
+
+		if validHex.MatchString(name) {
+			return fmt.Errorf("Invalid repository name (%s), cannot specify 64-byte hexadecimal strings", name)
+		}
 	} else {
 		namespace = nameParts[0]
 		name = nameParts[1]
 	}
-	validNamespace := regexp.MustCompile(`^([a-z0-9_]{4,30})$`)
 	if !validNamespace.MatchString(namespace) {
 		return fmt.Errorf("Invalid namespace name (%s), only [a-z0-9_] are allowed, size between 4 and 30", namespace)
 	}
-	validRepo := regexp.MustCompile(`^([a-z0-9-_.]+)$`)
 	if !validRepo.MatchString(name) {
 		return fmt.Errorf("Invalid repository name (%s), only [a-z0-9-_.] are allowed", name)
 	}
@@ -306,12 +300,12 @@ func AddRequiredHeadersToRedirectedRequests(req *http.Request, via []*http.Reque
 	if via != nil && via[0] != nil {
 		if trustedLocation(req) && trustedLocation(via[0]) {
 			req.Header = via[0].Header
-		} else {
-			for k, v := range via[0].Header {
-				if k != "Authorization" {
-					for _, vv := range v {
-						req.Header.Add(k, vv)
-					}
+			return nil
+		}
+		for k, v := range via[0].Header {
+			if k != "Authorization" {
+				for _, vv := range v {
+					req.Header.Add(k, vv)
 				}
 			}
 		}

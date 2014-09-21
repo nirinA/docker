@@ -81,6 +81,7 @@ func InitDriver(job *engine.Job) engine.Status {
 		network        *net.IPNet
 		enableIPTables = job.GetenvBool("EnableIptables")
 		icc            = job.GetenvBool("InterContainerCommunication")
+		ipMasq         = job.GetenvBool("EnableIpMasq")
 		ipForward      = job.GetenvBool("EnableIpForward")
 		bridgeIP       = job.Getenv("BridgeIP")
 	)
@@ -100,16 +101,13 @@ func InitDriver(job *engine.Job) engine.Status {
 	if err != nil {
 		// If we're not using the default bridge, fail without trying to create it
 		if !usingDefaultBridge {
-			job.Logf("bridge not found: %s", bridgeIface)
 			return job.Error(err)
 		}
 		// If the iface is not found, try to create it
-		job.Logf("creating new bridge for %s", bridgeIface)
 		if err := createBridge(bridgeIP); err != nil {
 			return job.Error(err)
 		}
 
-		job.Logf("getting iface addr")
 		addr, err = networkdriver.GetIfaceAddr(bridgeIface)
 		if err != nil {
 			return job.Error(err)
@@ -131,7 +129,7 @@ func InitDriver(job *engine.Job) engine.Status {
 
 	// Configure iptables for link support
 	if enableIPTables {
-		if err := setupIPTables(addr, icc); err != nil {
+		if err := setupIPTables(addr, icc, ipMasq); err != nil {
 			return job.Error(err)
 		}
 	}
@@ -174,15 +172,18 @@ func InitDriver(job *engine.Job) engine.Status {
 	return engine.StatusOK
 }
 
-func setupIPTables(addr net.Addr, icc bool) error {
+func setupIPTables(addr net.Addr, icc, ipmasq bool) error {
 	// Enable NAT
-	natArgs := []string{"POSTROUTING", "-t", "nat", "-s", addr.String(), "!", "-o", bridgeIface, "-j", "MASQUERADE"}
 
-	if !iptables.Exists(natArgs...) {
-		if output, err := iptables.Raw(append([]string{"-I"}, natArgs...)...); err != nil {
-			return fmt.Errorf("Unable to enable network bridge NAT: %s", err)
-		} else if len(output) != 0 {
-			return fmt.Errorf("Error iptables postrouting: %s", output)
+	if ipmasq {
+		natArgs := []string{"POSTROUTING", "-t", "nat", "-s", addr.String(), "!", "-o", bridgeIface, "-j", "MASQUERADE"}
+
+		if !iptables.Exists(natArgs...) {
+			if output, err := iptables.Raw(append([]string{"-I"}, natArgs...)...); err != nil {
+				return fmt.Errorf("Unable to enable network bridge NAT: %s", err)
+			} else if len(output) != 0 {
+				return fmt.Errorf("Error iptables postrouting: %s", output)
+			}
 		}
 	}
 

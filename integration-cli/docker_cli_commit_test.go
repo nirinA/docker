@@ -109,6 +109,8 @@ func TestCommitTTY(t *testing.T) {
 	if _, err := runCommand(cmd); err != nil {
 		t.Fatal(err)
 	}
+
+	logDone("commit - commit tty")
 }
 
 func TestCommitWithHostBindMount(t *testing.T) {
@@ -120,7 +122,7 @@ func TestCommitWithHostBindMount(t *testing.T) {
 	cmd = exec.Command(dockerBinary, "commit", "bind-commit", "bindtest")
 	imageId, _, err := runCommandWithOutput(cmd)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatal(imageId, err)
 	}
 	imageId = strings.Trim(imageId, "\r\n")
 

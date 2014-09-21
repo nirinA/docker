@@ -7,6 +7,7 @@ docker-run - Run a command in a new container
 # SYNOPSIS
 **docker run**
 [**-a**|**--attach**[=*[]*]]
+[**--add-host**[=*[]*]]
 [**-c**|**--cpu-shares**[=*0*]]
 [**--cap-add**[=*[]*]]
 [**--cap-drop**[=*[]*]]
@@ -63,6 +64,10 @@ and attach the console to the process’s standard input, output, and standard
 error. It can even pretend to be a TTY (this is what most commandline
 executables expect) and pass along signals. The **-a** option can be set for
 each of stdin, stdout, and stderr.
+
+**--add-host**=*hostname*:*ip*
+   Add a line to /etc/hosts. The format is hostname:ip.  The **--add-host**
+option can be set multiple times.
 
 **-c**, **--cpu-shares**=0
    CPU shares in relative weight. You can increase the priority of a container
@@ -186,7 +191,7 @@ exposed ports, use **docker port**.
 
 **-p**, **--publish**=[]
    Publish a container's port to the host (format: ip:hostPort:containerPort |
-ip::containerPort | hostPort:containerPort) (use **docker port** to see the
+ip::containerPort | hostPort:containerPort | containerPort) (use **docker port** to see the
 actual mapping)
 
 **--privileged**=*true*|*false*

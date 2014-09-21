@@ -35,11 +35,15 @@ var funcMap = template.FuncMap{
 	},
 }
 
-func (cli *DockerCli) getMethod(name string) (func(...string) error, bool) {
-	if len(name) == 0 {
-		return nil, false
+func (cli *DockerCli) getMethod(args ...string) (func(...string) error, bool) {
+	camelArgs := make([]string, len(args))
+	for i, s := range args {
+		if len(s) == 0 {
+			return nil, false
+		}
+		camelArgs[i] = strings.ToUpper(s[:1]) + strings.ToLower(s[1:])
 	}
-	methodName := "Cmd" + strings.ToUpper(name[:1]) + strings.ToLower(name[1:])
+	methodName := "Cmd" + strings.Join(camelArgs, "")
 	method := reflect.ValueOf(cli).MethodByName(methodName)
 	if !method.IsValid() {
 		return nil, false
@@ -49,6 +53,12 @@ func (cli *DockerCli) getMethod(name string) (func(...string) error, bool) {
 
 // Cmd executes the specified command
 func (cli *DockerCli) Cmd(args ...string) error {
+	if len(args) > 1 {
+		method, exists := cli.getMethod(args[:2]...)
+		if exists {
+			return method(args[2:]...)
+		}
+	}
 	if len(args) > 0 {
 		method, exists := cli.getMethod(args[0])
 		if !exists {
@@ -63,7 +73,11 @@ func (cli *DockerCli) Cmd(args ...string) error {
 func (cli *DockerCli) Subcmd(name, signature, description string) *flag.FlagSet {
 	flags := flag.NewFlagSet(name, flag.ContinueOnError)
 	flags.Usage = func() {
-		fmt.Fprintf(cli.err, "\nUsage: docker %s %s\n\n%s\n\n", name, signature, description)
+		options := ""
+		if flags.FlagCountUndeprecated() > 0 {
+			options = "[OPTIONS] "
+		}
+		fmt.Fprintf(cli.err, "\nUsage: docker %s %s%s\n\n%s\n\n", name, options, signature, description)
 		flags.PrintDefaults()
 		os.Exit(2)
 	}

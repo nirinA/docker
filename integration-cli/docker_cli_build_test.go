@@ -59,8 +59,18 @@ func TestBuildSixtySteps(t *testing.T) {
 	logDone("build - build an image with sixty build steps")
 }
 
-func TestAddSingleFileToRoot(t *testing.T) {
-	buildDirectory := filepath.Join(workingDirectory, "build_tests", "TestAdd", "SingleFileToRoot")
+func TestBuildAddSingleFileToRoot(t *testing.T) {
+	testDirName := "SingleFileToRoot"
+	sourceDirectory := filepath.Join(workingDirectory, "build_tests", "TestAdd", testDirName)
+	buildDirectory, err := ioutil.TempDir("", "test-build-add")
+	defer os.RemoveAll(buildDirectory)
+
+	err = copyWithCP(sourceDirectory, buildDirectory)
+	if err != nil {
+		t.Fatalf("failed to copy files to temporary directory: %s", err)
+	}
+
+	buildDirectory = filepath.Join(buildDirectory, testDirName)
 	f, err := os.OpenFile(filepath.Join(buildDirectory, "test_file"), os.O_CREATE, 0644)
 	if err != nil {
 		t.Fatal(err)
@@ -79,8 +89,18 @@ func TestAddSingleFileToRoot(t *testing.T) {
 }
 
 // Issue #3960: "ADD src ." hangs
-func TestAddSingleFileToWorkdir(t *testing.T) {
-	buildDirectory := filepath.Join(workingDirectory, "build_tests", "TestAdd", "SingleFileToWorkdir")
+func TestBuildAddSingleFileToWorkdir(t *testing.T) {
+	testDirName := "SingleFileToWorkdir"
+	sourceDirectory := filepath.Join(workingDirectory, "build_tests", "TestAdd", testDirName)
+	buildDirectory, err := ioutil.TempDir("", "test-build-add")
+	defer os.RemoveAll(buildDirectory)
+
+	err = copyWithCP(sourceDirectory, buildDirectory)
+	if err != nil {
+		t.Fatalf("failed to copy files to temporary directory: %s", err)
+	}
+
+	buildDirectory = filepath.Join(buildDirectory, testDirName)
 	f, err := os.OpenFile(filepath.Join(buildDirectory, "test_file"), os.O_CREATE, 0644)
 	if err != nil {
 		t.Fatal(err)
@@ -114,7 +134,7 @@ func TestAddSingleFileToWorkdir(t *testing.T) {
 	logDone("build - add single file to workdir")
 }
 
-func TestAddSingleFileToExistDir(t *testing.T) {
+func TestBuildAddSingleFileToExistDir(t *testing.T) {
 	buildDirectory := filepath.Join(workingDirectory, "build_tests", "TestAdd")
 	out, exitCode, err := dockerCmdInDir(t, buildDirectory, "build", "-t", "testaddimg", "SingleFileToExistDir")
 	errorOut(err, t, fmt.Sprintf("build failed to complete: %v %v", out, err))
@@ -128,7 +148,67 @@ func TestAddSingleFileToExistDir(t *testing.T) {
 	logDone("build - add single file to existing dir")
 }
 
-func TestAddSingleFileToNonExistDir(t *testing.T) {
+func TestBuildCopyAddMultipleFiles(t *testing.T) {
+	buildDirectory := filepath.Join(workingDirectory, "build_tests", "TestCopy")
+	out, exitCode, err := dockerCmdInDir(t, buildDirectory, "build", "-t", "testaddimg", "MultipleFiles")
+	errorOut(err, t, fmt.Sprintf("build failed to complete: %v %v", out, err))
+
+	if err != nil || exitCode != 0 {
+		t.Fatal("failed to build the image")
+	}
+
+	deleteImages("testaddimg")
+
+	logDone("build - mulitple file copy/add tests")
+}
+
+func TestBuildAddMultipleFilesToFile(t *testing.T) {
+	name := "testaddmultiplefilestofile"
+	defer deleteImages(name)
+	ctx, err := fakeContext(`FROM scratch
+	ADD file1.txt file2.txt test
+        `,
+		map[string]string{
+			"file1.txt": "test1",
+			"file2.txt": "test1",
+		})
+	defer ctx.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	expected := "When using ADD with more than one source file, the destination must be a directory and end with a /"
+	if _, err := buildImageFromContext(name, ctx, true); err == nil || !strings.Contains(err.Error(), expected) {
+		t.Fatalf("Wrong error: (should contain \"%s\") got:\n%v", expected, err)
+	}
+
+	logDone("build - multiple add files to file")
+}
+
+func TestBuildCopyMultipleFilesToFile(t *testing.T) {
+	name := "testcopymultiplefilestofile"
+	defer deleteImages(name)
+	ctx, err := fakeContext(`FROM scratch
+	COPY file1.txt file2.txt test
+        `,
+		map[string]string{
+			"file1.txt": "test1",
+			"file2.txt": "test1",
+		})
+	defer ctx.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	expected := "When using COPY with more than one source file, the destination must be a directory and end with a /"
+	if _, err := buildImageFromContext(name, ctx, true); err == nil || !strings.Contains(err.Error(), expected) {
+		t.Fatalf("Wrong error: (should contain \"%s\") got:\n%v", expected, err)
+	}
+
+	logDone("build - multiple copy files to file")
+}
+
+func TestBuildAddSingleFileToNonExistDir(t *testing.T) {
 	buildDirectory := filepath.Join(workingDirectory, "build_tests", "TestAdd")
 	out, exitCode, err := dockerCmdInDir(t, buildDirectory, "build", "-t", "testaddimg", "SingleFileToNonExistDir")
 	errorOut(err, t, fmt.Sprintf("build failed to complete: %v %v", out, err))
@@ -142,7 +222,7 @@ func TestAddSingleFileToNonExistDir(t *testing.T) {
 	logDone("build - add single file to non-existing dir")
 }
 
-func TestAddDirContentToRoot(t *testing.T) {
+func TestBuildAddDirContentToRoot(t *testing.T) {
 	buildDirectory := filepath.Join(workingDirectory, "build_tests", "TestAdd")
 	out, exitCode, err := dockerCmdInDir(t, buildDirectory, "build", "-t", "testaddimg", "DirContentToRoot")
 	errorOut(err, t, fmt.Sprintf("build failed to complete: %v %v", out, err))
@@ -156,7 +236,7 @@ func TestAddDirContentToRoot(t *testing.T) {
 	logDone("build - add directory contents to root")
 }
 
-func TestAddDirContentToExistDir(t *testing.T) {
+func TestBuildAddDirContentToExistDir(t *testing.T) {
 	buildDirectory := filepath.Join(workingDirectory, "build_tests", "TestAdd")
 	out, exitCode, err := dockerCmdInDir(t, buildDirectory, "build", "-t", "testaddimg", "DirContentToExistDir")
 	errorOut(err, t, fmt.Sprintf("build failed to complete: %v %v", out, err))
@@ -170,8 +250,18 @@ func TestAddDirContentToExistDir(t *testing.T) {
 	logDone("build - add directory contents to existing dir")
 }
 
-func TestAddWholeDirToRoot(t *testing.T) {
-	buildDirectory := filepath.Join(workingDirectory, "build_tests", "TestAdd", "WholeDirToRoot")
+func TestBuildAddWholeDirToRoot(t *testing.T) {
+	testDirName := "WholeDirToRoot"
+	sourceDirectory := filepath.Join(workingDirectory, "build_tests", "TestAdd", testDirName)
+	buildDirectory, err := ioutil.TempDir("", "test-build-add")
+	defer os.RemoveAll(buildDirectory)
+
+	err = copyWithCP(sourceDirectory, buildDirectory)
+	if err != nil {
+		t.Fatalf("failed to copy files to temporary directory: %s", err)
+	}
+
+	buildDirectory = filepath.Join(buildDirectory, testDirName)
 	test_dir := filepath.Join(buildDirectory, "test_dir")
 	if err := os.MkdirAll(test_dir, 0755); err != nil {
 		t.Fatal(err)
@@ -193,7 +283,7 @@ func TestAddWholeDirToRoot(t *testing.T) {
 	logDone("build - add whole directory to root")
 }
 
-func TestAddEtcToRoot(t *testing.T) {
+func TestBuildAddEtcToRoot(t *testing.T) {
 	buildDirectory := filepath.Join(workingDirectory, "build_tests", "TestAdd")
 	out, exitCode, err := dockerCmdInDir(t, buildDirectory, "build", "-t", "testaddimg", "EtcToRoot")
 	errorOut(err, t, fmt.Sprintf("build failed to complete: %v %v", out, err))
@@ -206,8 +296,18 @@ func TestAddEtcToRoot(t *testing.T) {
 	logDone("build - add etc directory to root")
 }
 
-func TestCopySingleFileToRoot(t *testing.T) {
-	buildDirectory := filepath.Join(workingDirectory, "build_tests", "TestCopy", "SingleFileToRoot")
+func TestBuildCopySingleFileToRoot(t *testing.T) {
+	testDirName := "SingleFileToRoot"
+	sourceDirectory := filepath.Join(workingDirectory, "build_tests", "TestCopy", testDirName)
+	buildDirectory, err := ioutil.TempDir("", "test-build-add")
+	defer os.RemoveAll(buildDirectory)
+
+	err = copyWithCP(sourceDirectory, buildDirectory)
+	if err != nil {
+		t.Fatalf("failed to copy files to temporary directory: %s", err)
+	}
+
+	buildDirectory = filepath.Join(buildDirectory, testDirName)
 	f, err := os.OpenFile(filepath.Join(buildDirectory, "test_file"), os.O_CREATE, 0644)
 	if err != nil {
 		t.Fatal(err)
@@ -226,8 +326,18 @@ func TestCopySingleFileToRoot(t *testing.T) {
 }
 
 // Issue #3960: "ADD src ." hangs - adapted for COPY
-func TestCopySingleFileToWorkdir(t *testing.T) {
-	buildDirectory := filepath.Join(workingDirectory, "build_tests", "TestCopy", "SingleFileToWorkdir")
+func TestBuildCopySingleFileToWorkdir(t *testing.T) {
+	testDirName := "SingleFileToWorkdir"
+	sourceDirectory := filepath.Join(workingDirectory, "build_tests", "TestCopy", testDirName)
+	buildDirectory, err := ioutil.TempDir("", "test-build-add")
+	defer os.RemoveAll(buildDirectory)
+
+	err = copyWithCP(sourceDirectory, buildDirectory)
+	if err != nil {
+		t.Fatalf("failed to copy files to temporary directory: %s", err)
+	}
+
+	buildDirectory = filepath.Join(buildDirectory, testDirName)
 	f, err := os.OpenFile(filepath.Join(buildDirectory, "test_file"), os.O_CREATE, 0644)
 	if err != nil {
 		t.Fatal(err)
@@ -261,7 +371,7 @@ func TestCopySingleFileToWorkdir(t *testing.T) {
 	logDone("build - copy single file to workdir")
 }
 
-func TestCopySingleFileToExistDir(t *testing.T) {
+func TestBuildCopySingleFileToExistDir(t *testing.T) {
 	buildDirectory := filepath.Join(workingDirectory, "build_tests", "TestCopy")
 	out, exitCode, err := dockerCmdInDir(t, buildDirectory, "build", "-t", "testcopyimg", "SingleFileToExistDir")
 	errorOut(err, t, fmt.Sprintf("build failed to complete: %v %v", out, err))
@@ -272,10 +382,10 @@ func TestCopySingleFileToExistDir(t *testing.T) {
 
 	deleteImages("testcopyimg")
 
-	logDone("build - add single file to existing dir")
+	logDone("build - copy single file to existing dir")
 }
 
-func TestCopySingleFileToNonExistDir(t *testing.T) {
+func TestBuildCopySingleFileToNonExistDir(t *testing.T) {
 	buildDirectory := filepath.Join(workingDirectory, "build_tests", "TestCopy")
 	out, exitCode, err := dockerCmdInDir(t, buildDirectory, "build", "-t", "testcopyimg", "SingleFileToNonExistDir")
 	errorOut(err, t, fmt.Sprintf("build failed to complete: %v %v", out, err))
@@ -289,7 +399,7 @@ func TestCopySingleFileToNonExistDir(t *testing.T) {
 	logDone("build - copy single file to non-existing dir")
 }
 
-func TestCopyDirContentToRoot(t *testing.T) {
+func TestBuildCopyDirContentToRoot(t *testing.T) {
 	buildDirectory := filepath.Join(workingDirectory, "build_tests", "TestCopy")
 	out, exitCode, err := dockerCmdInDir(t, buildDirectory, "build", "-t", "testcopyimg", "DirContentToRoot")
 	errorOut(err, t, fmt.Sprintf("build failed to complete: %v %v", out, err))
@@ -303,7 +413,7 @@ func TestCopyDirContentToRoot(t *testing.T) {
 	logDone("build - copy directory contents to root")
 }
 
-func TestCopyDirContentToExistDir(t *testing.T) {
+func TestBuildCopyDirContentToExistDir(t *testing.T) {
 	buildDirectory := filepath.Join(workingDirectory, "build_tests", "TestCopy")
 	out, exitCode, err := dockerCmdInDir(t, buildDirectory, "build", "-t", "testcopyimg", "DirContentToExistDir")
 	errorOut(err, t, fmt.Sprintf("build failed to complete: %v %v", out, err))
@@ -317,8 +427,18 @@ func TestCopyDirContentToExistDir(t *testing.T) {
 	logDone("build - copy directory contents to existing dir")
 }
 
-func TestCopyWholeDirToRoot(t *testing.T) {
-	buildDirectory := filepath.Join(workingDirectory, "build_tests", "TestCopy", "WholeDirToRoot")
+func TestBuildCopyWholeDirToRoot(t *testing.T) {
+	testDirName := "WholeDirToRoot"
+	sourceDirectory := filepath.Join(workingDirectory, "build_tests", "TestCopy", testDirName)
+	buildDirectory, err := ioutil.TempDir("", "test-build-add")
+	defer os.RemoveAll(buildDirectory)
+
+	err = copyWithCP(sourceDirectory, buildDirectory)
+	if err != nil {
+		t.Fatalf("failed to copy files to temporary directory: %s", err)
+	}
+
+	buildDirectory = filepath.Join(buildDirectory, testDirName)
 	test_dir := filepath.Join(buildDirectory, "test_dir")
 	if err := os.MkdirAll(test_dir, 0755); err != nil {
 		t.Fatal(err)
@@ -340,7 +460,7 @@ func TestCopyWholeDirToRoot(t *testing.T) {
 	logDone("build - copy whole directory to root")
 }
 
-func TestCopyEtcToRoot(t *testing.T) {
+func TestBuildCopyEtcToRoot(t *testing.T) {
 	buildDirectory := filepath.Join(workingDirectory, "build_tests", "TestCopy")
 	out, exitCode, err := dockerCmdInDir(t, buildDirectory, "build", "-t", "testcopyimg", "EtcToRoot")
 	errorOut(err, t, fmt.Sprintf("build failed to complete: %v %v", out, err))
@@ -353,7 +473,7 @@ func TestCopyEtcToRoot(t *testing.T) {
 	logDone("build - copy etc directory to root")
 }
 
-func TestCopyDisallowRemote(t *testing.T) {
+func TestBuildCopyDisallowRemote(t *testing.T) {
 	buildDirectory := filepath.Join(workingDirectory, "build_tests", "TestCopy")
 	buildCmd := exec.Command(dockerBinary, "build", "-t", "testcopyimg", "DisallowRemote")
 	buildCmd.Dir = buildDirectory
@@ -370,8 +490,18 @@ func TestCopyDisallowRemote(t *testing.T) {
 // Issue #5270 - ensure we throw a better error than "unexpected EOF"
 // when we can't access files in the context.
 func TestBuildWithInaccessibleFilesInContext(t *testing.T) {
-	buildDirectory := filepath.Join(workingDirectory, "build_tests", "TestBuildWithInaccessibleFilesInContext")
+	testDirName := "TestBuildWithInaccessibleFilesInContext"
 
+	sourceDirectory := filepath.Join(workingDirectory, "build_tests", testDirName)
+	buildDirectory, err := ioutil.TempDir("", "test-build-inaccessible-directory")
+	defer os.RemoveAll(buildDirectory)
+
+	err = copyWithCP(sourceDirectory, buildDirectory)
+	if err != nil {
+		t.Fatalf("failed to copy files to temporary directory: %s", err)
+	}
+
+	buildDirectory = filepath.Join(buildDirectory, testDirName)
 	{
 		// This is used to ensure we detect inaccessible files early during build in the cli client
 		pathToInaccessibleFileBuildDirectory := filepath.Join(buildDirectory, "inaccessiblefile")
@@ -685,10 +815,11 @@ func TestBuildRelativeWorkdir(t *testing.T) {
 
 func TestBuildEnv(t *testing.T) {
 	name := "testbuildenv"
-	expected := "[PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin PORT=2375]"
+	expected := "[PATH=/test:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin PORT=2375]"
 	defer deleteImages(name)
 	_, err := buildImage(name,
 		`FROM busybox
+		ENV PATH /test:$PATH
         ENV PORT 2375
 		RUN [ $(env | grep PORT) = 'PORT=2375' ]`,
 		true)
@@ -703,6 +834,56 @@ func TestBuildEnv(t *testing.T) {
 		t.Fatalf("Env %s, expected %s", res, expected)
 	}
 	logDone("build - env")
+}
+
+func TestBuildContextCleanup(t *testing.T) {
+	name := "testbuildcontextcleanup"
+	defer deleteImages(name)
+	entries, err := ioutil.ReadDir("/var/lib/docker/tmp")
+	if err != nil {
+		t.Fatalf("failed to list contents of tmp dir: %s", err)
+	}
+	_, err = buildImage(name,
+		`FROM scratch
+        ENTRYPOINT ["/bin/echo"]`,
+		true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entriesFinal, err := ioutil.ReadDir("/var/lib/docker/tmp")
+	if err != nil {
+		t.Fatalf("failed to list contents of tmp dir: %s", err)
+	}
+	if err = compareDirectoryEntries(entries, entriesFinal); err != nil {
+		t.Fatalf("context should have been deleted, but wasn't")
+	}
+
+	logDone("build - verify context cleanup works properly")
+}
+
+func TestBuildContextCleanupFailedBuild(t *testing.T) {
+	name := "testbuildcontextcleanup"
+	defer deleteImages(name)
+	entries, err := ioutil.ReadDir("/var/lib/docker/tmp")
+	if err != nil {
+		t.Fatalf("failed to list contents of tmp dir: %s", err)
+	}
+	_, err = buildImage(name,
+		`FROM scratch
+	RUN /non/existing/command`,
+		true)
+	if err == nil {
+		t.Fatalf("expected build to fail, but it didn't")
+	}
+	entriesFinal, err := ioutil.ReadDir("/var/lib/docker/tmp")
+	if err != nil {
+		t.Fatalf("failed to list contents of tmp dir: %s", err)
+	}
+	if err = compareDirectoryEntries(entries, entriesFinal); err != nil {
+		t.Fatalf("context should have been deleted, but wasn't")
+	}
+
+	logDone("build - verify context cleanup works properly after a failed build")
 }
 
 func TestBuildCmd(t *testing.T) {
@@ -747,6 +928,29 @@ func TestBuildExpose(t *testing.T) {
 	logDone("build - expose")
 }
 
+func TestBuildEmptyEntrypoint(t *testing.T) {
+	name := "testbuildentrypoint"
+	defer deleteImages(name)
+	expected := "[]"
+
+	_, err := buildImage(name,
+		`FROM busybox
+        ENTRYPOINT []`,
+		true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := inspectField(name, "Config.Entrypoint")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res != expected {
+		t.Fatalf("Entrypoint %s, expected %s", res, expected)
+	}
+
+	logDone("build - empty entrypoint")
+}
+
 func TestBuildEntrypoint(t *testing.T) {
 	name := "testbuildentrypoint"
 	expected := "[/bin/echo]"
@@ -765,6 +969,7 @@ func TestBuildEntrypoint(t *testing.T) {
 	if res != expected {
 		t.Fatalf("Entrypoint %s, expected %s", res, expected)
 	}
+
 	logDone("build - entrypoint")
 }
 
@@ -912,6 +1117,35 @@ func TestBuildADDLocalFileWithCache(t *testing.T) {
 		t.Fatal("The cache should have been used but hasn't.")
 	}
 	logDone("build - add local file with cache")
+}
+
+func TestBuildADDMultipleLocalFileWithCache(t *testing.T) {
+	name := "testbuildaddmultiplelocalfilewithcache"
+	defer deleteImages(name)
+	dockerfile := `
+		FROM busybox
+        MAINTAINER dockerio
+        ADD foo Dockerfile /usr/lib/bla/
+		RUN [ "$(cat /usr/lib/bla/foo)" = "hello" ]`
+	ctx, err := fakeContext(dockerfile, map[string]string{
+		"foo": "hello",
+	})
+	defer ctx.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	id1, err := buildImageFromContext(name, ctx, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id2, err := buildImageFromContext(name, ctx, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id1 != id2 {
+		t.Fatal("The cache should have been used but hasn't.")
+	}
+	logDone("build - add multiple local files with cache")
 }
 
 func TestBuildADDLocalFileWithoutCache(t *testing.T) {
@@ -1150,15 +1384,15 @@ func testContextTar(t *testing.T, compression archive.Compression) {
 	logDone(fmt.Sprintf("build - build an image with a context tar, compression: %v", compression))
 }
 
-func TestContextTarGzip(t *testing.T) {
+func TestBuildContextTarGzip(t *testing.T) {
 	testContextTar(t, archive.Gzip)
 }
 
-func TestContextTarNoCompression(t *testing.T) {
+func TestBuildContextTarNoCompression(t *testing.T) {
 	testContextTar(t, archive.Uncompressed)
 }
 
-func TestNoContext(t *testing.T) {
+func TestBuildNoContext(t *testing.T) {
 	buildCmd := exec.Command(dockerBinary, "build", "-t", "nocontext", "-")
 	buildCmd.Stdin = strings.NewReader("FROM busybox\nCMD echo ok\n")
 
@@ -1229,7 +1463,7 @@ func TestBuildWithVolumeOwnership(t *testing.T) {
 	cmd := exec.Command(dockerBinary, "run", "--rm", "testbuildimg", "ls", "-la", "/test")
 	out, _, err := runCommandWithOutput(cmd)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatal(out, err)
 	}
 
 	if expected := "drw-------"; !strings.Contains(out, expected) {
@@ -1513,7 +1747,7 @@ docker.com>"
 	logDone("build - validate escaping whitespace")
 }
 
-func TestDockerignore(t *testing.T) {
+func TestBuildDockerignore(t *testing.T) {
 	name := "testbuilddockerignore"
 	defer deleteImages(name)
 	dockerfile := `
@@ -1544,7 +1778,7 @@ func TestDockerignore(t *testing.T) {
 	logDone("build - test .dockerignore")
 }
 
-func TestDockerignoringDockerfile(t *testing.T) {
+func TestBuildDockerignoringDockerfile(t *testing.T) {
 	name := "testbuilddockerignoredockerfile"
 	defer deleteImages(name)
 	dockerfile := `
@@ -1563,7 +1797,7 @@ func TestDockerignoringDockerfile(t *testing.T) {
 	logDone("build - test .dockerignore of Dockerfile")
 }
 
-func TestDockerignoringWholeDir(t *testing.T) {
+func TestBuildDockerignoringWholeDir(t *testing.T) {
 	name := "testbuilddockerignorewholedir"
 	defer deleteImages(name)
 	dockerfile := `
@@ -1708,6 +1942,9 @@ func TestBuildEnvUsage(t *testing.T) {
 	name := "testbuildenvusage"
 	defer deleteImages(name)
 	dockerfile := `FROM busybox
+ENV    PATH $HOME/bin:$PATH
+ENV    PATH /tmp:$PATH
+RUN    [ "$PATH" = "/tmp:$HOME/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" ]
 ENV    FOO /foo/baz
 ENV    BAR /bar
 ENV    BAZ $BAR
@@ -1717,7 +1954,8 @@ RUN    [ "$FOOPATH" = "$PATH:/foo/baz" ]
 ENV	   FROM hello/docker/world
 ENV    TO /docker/world/hello
 ADD    $FROM $TO
-RUN    [ "$(cat $TO)" = "hello" ]`
+RUN    [ "$(cat $TO)" = "hello" ]
+`
 	ctx, err := fakeContext(dockerfile, map[string]string{
 		"hello/docker/world": "hello",
 	})
@@ -1868,4 +2106,25 @@ func TestBuildCleanupCmdOnEntrypoint(t *testing.T) {
 		t.Fatalf("Entrypoint %s, expected %s", res, expected)
 	}
 	logDone("build - cleanup cmd on ENTRYPOINT")
+}
+
+func TestBuildClearCmd(t *testing.T) {
+	name := "testbuildclearcmd"
+	defer deleteImages(name)
+	_, err := buildImage(name,
+		`From scratch
+   ENTRYPOINT ["/bin/bash"]
+   CMD []`,
+		true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := inspectFieldJSON(name, "Config.Cmd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res != "[]" {
+		t.Fatalf("Cmd %s, expected %s", res, "[]")
+	}
+	logDone("build - clearcmd")
 }
