@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -23,15 +24,17 @@ import (
 	"time"
 
 	"github.com/docker/docker/api"
-	"github.com/docker/docker/archive"
 	"github.com/docker/docker/dockerversion"
 	"github.com/docker/docker/engine"
+	"github.com/docker/docker/graph"
 	"github.com/docker/docker/nat"
 	"github.com/docker/docker/opts"
+	"github.com/docker/docker/pkg/archive"
 	"github.com/docker/docker/pkg/log"
 	flag "github.com/docker/docker/pkg/mflag"
 	"github.com/docker/docker/pkg/parsers"
 	"github.com/docker/docker/pkg/parsers/filters"
+	"github.com/docker/docker/pkg/promise"
 	"github.com/docker/docker/pkg/signal"
 	"github.com/docker/docker/pkg/term"
 	"github.com/docker/docker/pkg/timeutils"
@@ -174,9 +177,14 @@ func (cli *DockerCli) CmdBuild(args ...string) error {
 
 	//Check if the given image name can be resolved
 	if *tag != "" {
-		repository, _ := parsers.ParseRepositoryTag(*tag)
+		repository, tag := parsers.ParseRepositoryTag(*tag)
 		if _, _, err := registry.ResolveRepositoryName(repository); err != nil {
 			return err
+		}
+		if len(tag) > 0 {
+			if err := graph.ValidateTagName(tag); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -273,16 +281,18 @@ func (cli *DockerCli) CmdLogin(args ...string) error {
 			username = authconfig.Username
 		}
 	}
+	// Assume that a different username means they may not want to use
+	// the password or email from the config file, so prompt them
 	if username != authconfig.Username {
 		if password == "" {
-			oldState, _ := term.SaveState(cli.terminalFd)
+			oldState, _ := term.SaveState(cli.inFd)
 			fmt.Fprintf(cli.out, "Password: ")
-			term.DisableEcho(cli.terminalFd, oldState)
+			term.DisableEcho(cli.inFd, oldState)
 
 			password = readInput(cli.in, cli.out)
 			fmt.Fprint(cli.out, "\n")
 
-			term.RestoreTerminal(cli.terminalFd, oldState)
+			term.RestoreTerminal(cli.inFd, oldState)
 			if password == "" {
 				return fmt.Errorf("Error : Password Required")
 			}
@@ -296,8 +306,16 @@ func (cli *DockerCli) CmdLogin(args ...string) error {
 			}
 		}
 	} else {
-		password = authconfig.Password
-		email = authconfig.Email
+		// However, if they don't override the username use the
+		// password or email from the cmd line if specified. IOW, allow
+		// then to change/overide them.  And if not specified, just
+		// use what's in the config file
+		if password == "" {
+			password = authconfig.Password
+		}
+		if email == "" {
+			email = authconfig.Email
+		}
 	}
 	authconfig.Username = username
 	authconfig.Password = password
@@ -602,13 +620,13 @@ func (cli *DockerCli) CmdStart(args ...string) error {
 			return fmt.Errorf("You cannot start and attach multiple containers at once.")
 		}
 
-		steam, _, err := cli.call("GET", "/containers/"+cmd.Arg(0)+"/json", nil, false)
+		stream, _, err := cli.call("GET", "/containers/"+cmd.Arg(0)+"/json", nil, false)
 		if err != nil {
 			return err
 		}
 
 		env := engine.Env{}
-		if err := env.Decode(steam); err != nil {
+		if err := env.Decode(stream); err != nil {
 			return err
 		}
 		config := env.GetSubEnv("Config")
@@ -632,7 +650,7 @@ func (cli *DockerCli) CmdStart(args ...string) error {
 		v.Set("stdout", "1")
 		v.Set("stderr", "1")
 
-		cErr = utils.Go(func() error {
+		cErr = promise.Go(func() error {
 			return cli.hijack("POST", "/containers/"+cmd.Arg(0)+"/attach?"+v.Encode(), tty, in, cli.out, cli.err, nil, nil)
 		})
 	}
@@ -654,18 +672,26 @@ func (cli *DockerCli) CmdStart(args ...string) error {
 	if encounteredError != nil {
 		if *openStdin || *attach {
 			cli.in.Close()
-			<-cErr
 		}
 		return encounteredError
 	}
 
 	if *openStdin || *attach {
-		if tty && cli.isTerminal {
+		if tty && cli.isTerminalOut {
 			if err := cli.monitorTtySize(cmd.Arg(0), false); err != nil {
 				log.Errorf("Error monitoring TTY size: %s", err)
 			}
 		}
-		return <-cErr
+		if attchErr := <-cErr; attchErr != nil {
+			return attchErr
+		}
+		_, status, err := getExitCode(cli, cmd.Arg(0))
+		if err != nil {
+			return err
+		}
+		if status != 0 {
+			return &utils.StatusError{StatusCode: status}
+		}
 	}
 	return nil
 }
@@ -1459,57 +1485,68 @@ func (cli *DockerCli) printTreeNode(noTrunc bool, image *engine.Env, prefix stri
 }
 
 func (cli *DockerCli) CmdPs(args ...string) error {
-	cmd := cli.Subcmd("ps", "", "List containers")
-	quiet := cmd.Bool([]string{"q", "-quiet"}, false, "Only display numeric IDs")
-	size := cmd.Bool([]string{"s", "-size"}, false, "Display sizes")
-	all := cmd.Bool([]string{"a", "-all"}, false, "Show all containers. Only running containers are shown by default.")
-	noTrunc := cmd.Bool([]string{"#notrunc", "-no-trunc"}, false, "Don't truncate output")
-	nLatest := cmd.Bool([]string{"l", "-latest"}, false, "Show only the latest created container, include non-running ones.")
-	since := cmd.String([]string{"#sinceId", "#-since-id", "-since"}, "", "Show only containers created since Id or Name, include non-running ones.")
-	before := cmd.String([]string{"#beforeId", "#-before-id", "-before"}, "", "Show only container created before Id or Name, include non-running ones.")
-	last := cmd.Int([]string{"n"}, -1, "Show n last created containers, include non-running ones.")
+	var (
+		err error
 
-	flFilter := opts.NewListOpts(nil)
-	cmd.Var(&flFilter, []string{"f", "-filter"}, "Provide filter values. Valid filters:\nexited=<int> - containers with exit code of <int>")
+		psFilterArgs = filters.Args{}
+		v            = url.Values{}
+
+		cmd      = cli.Subcmd("ps", "", "List containers")
+		quiet    = cmd.Bool([]string{"q", "-quiet"}, false, "Only display numeric IDs")
+		size     = cmd.Bool([]string{"s", "-size"}, false, "Display sizes")
+		all      = cmd.Bool([]string{"a", "-all"}, false, "Show all containers. Only running containers are shown by default.")
+		noTrunc  = cmd.Bool([]string{"#notrunc", "-no-trunc"}, false, "Don't truncate output")
+		nLatest  = cmd.Bool([]string{"l", "-latest"}, false, "Show only the latest created container, include non-running ones.")
+		since    = cmd.String([]string{"#sinceId", "#-since-id", "-since"}, "", "Show only containers created since Id or Name, include non-running ones.")
+		before   = cmd.String([]string{"#beforeId", "#-before-id", "-before"}, "", "Show only container created before Id or Name, include non-running ones.")
+		last     = cmd.Int([]string{"n"}, -1, "Show n last created containers, include non-running ones.")
+		flFilter = opts.NewListOpts(nil)
+	)
+
+	cmd.Var(&flFilter, []string{"f", "-filter"}, "Provide filter values. Valid filters:\nexited=<int> - containers with exit code of <int>\nstatus=(restarting|running|paused|exited)")
 
 	if err := cmd.Parse(args); err != nil {
 		return nil
 	}
-	v := url.Values{}
+
 	if *last == -1 && *nLatest {
 		*last = 1
 	}
+
 	if *all {
 		v.Set("all", "1")
 	}
+
 	if *last != -1 {
 		v.Set("limit", strconv.Itoa(*last))
 	}
+
 	if *since != "" {
 		v.Set("since", *since)
 	}
+
 	if *before != "" {
 		v.Set("before", *before)
 	}
+
 	if *size {
 		v.Set("size", "1")
 	}
 
 	// Consolidate all filter flags, and sanity check them.
 	// They'll get processed in the daemon/server.
-	psFilterArgs := filters.Args{}
 	for _, f := range flFilter.GetAll() {
-		var err error
-		psFilterArgs, err = filters.ParseFlag(f, psFilterArgs)
-		if err != nil {
+		if psFilterArgs, err = filters.ParseFlag(f, psFilterArgs); err != nil {
 			return err
 		}
 	}
+
 	if len(psFilterArgs) > 0 {
 		filterJson, err := filters.ToParam(psFilterArgs)
 		if err != nil {
 			return err
 		}
+
 		v.Set("filters", filterJson)
 	}
 
@@ -1522,9 +1559,11 @@ func (cli *DockerCli) CmdPs(args ...string) error {
 	if _, err := outs.ReadListFrom(body); err != nil {
 		return err
 	}
+
 	w := tabwriter.NewWriter(cli.out, 20, 1, 3, ' ', 0)
 	if !*quiet {
 		fmt.Fprint(w, "CONTAINER ID\tIMAGE\tCOMMAND\tCREATED\tSTATUS\tPORTS\tNAMES")
+
 		if *size {
 			fmt.Fprintln(w, "\tSIZE")
 		} else {
@@ -1532,51 +1571,69 @@ func (cli *DockerCli) CmdPs(args ...string) error {
 		}
 	}
 
+	stripNamePrefix := func(ss []string) []string {
+		for i, s := range ss {
+			ss[i] = s[1:]
+		}
+
+		return ss
+	}
+
 	for _, out := range outs.Data {
-		var (
-			outID    = out.Get("Id")
-			outNames = out.GetList("Names")
-		)
+		outID := out.Get("Id")
 
 		if !*noTrunc {
 			outID = utils.TruncateID(outID)
 		}
 
-		// Remove the leading / from the names
-		for i := 0; i < len(outNames); i++ {
-			outNames[i] = outNames[i][1:]
+		if *quiet {
+			fmt.Fprintln(w, outID)
+
+			continue
 		}
 
-		if !*quiet {
-			var (
-				outCommand   = out.Get("Command")
-				ports        = engine.NewTable("", 0)
-				outNamesList = strings.Join(outNames, ",")
-			)
-			outCommand = strconv.Quote(outCommand)
-			if !*noTrunc {
-				outCommand = utils.Trunc(outCommand, 20)
-				outNamesList = outNames[0]
-			}
-			ports.ReadListFrom([]byte(out.Get("Ports")))
-			fmt.Fprintf(w, "%s\t%s\t%s\t%s ago\t%s\t%s\t%s\t", outID, out.Get("Image"), outCommand, units.HumanDuration(time.Now().UTC().Sub(time.Unix(out.GetInt64("Created"), 0))), out.Get("Status"), api.DisplayablePorts(ports), outNamesList)
-			if *size {
-				if out.GetInt("SizeRootFs") > 0 {
-					fmt.Fprintf(w, "%s (virtual %s)\n", units.HumanSize(out.GetInt64("SizeRw")), units.HumanSize(out.GetInt64("SizeRootFs")))
-				} else {
-					fmt.Fprintf(w, "%s\n", units.HumanSize(out.GetInt64("SizeRw")))
+		var (
+			outNames   = stripNamePrefix(out.GetList("Names"))
+			outCommand = strconv.Quote(out.Get("Command"))
+			ports      = engine.NewTable("", 0)
+		)
+
+		if !*noTrunc {
+			outCommand = utils.Trunc(outCommand, 20)
+
+			// only display the default name for the container with notrunc is passed
+			for _, name := range outNames {
+				if len(strings.Split(name, "/")) == 1 {
+					outNames = []string{name}
+
+					break
 				}
-			} else {
-				fmt.Fprint(w, "\n")
 			}
-		} else {
-			fmt.Fprintln(w, outID)
 		}
+
+		ports.ReadListFrom([]byte(out.Get("Ports")))
+
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s ago\t%s\t%s\t%s\t", outID, out.Get("Image"), outCommand,
+			units.HumanDuration(time.Now().UTC().Sub(time.Unix(out.GetInt64("Created"), 0))),
+			out.Get("Status"), api.DisplayablePorts(ports), strings.Join(outNames, ","))
+
+		if *size {
+			if out.GetInt("SizeRootFs") > 0 {
+				fmt.Fprintf(w, "%s (virtual %s)\n", units.HumanSize(out.GetInt64("SizeRw")), units.HumanSize(out.GetInt64("SizeRootFs")))
+			} else {
+				fmt.Fprintf(w, "%s\n", units.HumanSize(out.GetInt64("SizeRw")))
+			}
+
+			continue
+		}
+
+		fmt.Fprint(w, "\n")
 	}
 
 	if !*quiet {
 		w.Flush()
 	}
+
 	return nil
 }
 
@@ -1812,7 +1869,7 @@ func (cli *DockerCli) CmdAttach(args ...string) error {
 		tty    = config.GetBool("Tty")
 	)
 
-	if tty && cli.isTerminal {
+	if tty && cli.isTerminalOut {
 		if err := cli.monitorTtySize(cmd.Arg(0), false); err != nil {
 			log.Debugf("Error monitoring TTY size: %s", err)
 		}
@@ -1939,6 +1996,10 @@ func (cli *DockerCli) CmdTag(args ...string) error {
 }
 
 func (cli *DockerCli) pullImage(image string) error {
+	return cli.pullImageCustomOut(image, cli.out)
+}
+
+func (cli *DockerCli) pullImageCustomOut(image string, out io.Writer) error {
 	v := url.Values{}
 	repos, tag := parsers.ParseRepositoryTag(image)
 	// pull only the image tagged 'latest' if no tag was specified
@@ -1967,7 +2028,7 @@ func (cli *DockerCli) pullImage(image string) error {
 	registryAuthHeader := []string{
 		base64.URLEncoding.EncodeToString(buf),
 	}
-	if err = cli.stream("POST", "/images/create?"+v.Encode(), nil, cli.err, map[string][]string{"X-Registry-Auth": registryAuthHeader}); err != nil {
+	if err = cli.stream("POST", "/images/create?"+v.Encode(), nil, out, map[string][]string{"X-Registry-Auth": registryAuthHeader}); err != nil {
 		return err
 	}
 	return nil
@@ -2017,12 +2078,7 @@ func (cli *DockerCli) createContainer(config *runconfig.Config, hostConfig *runc
 		containerValues.Set("name", name)
 	}
 
-	var data interface{}
-	if hostConfig != nil {
-		data = runconfig.MergeConfigs(config, hostConfig)
-	} else {
-		data = config
-	}
+	mergedConfig := runconfig.MergeConfigs(config, hostConfig)
 
 	var containerIDFile *cidFile
 	if cidfile != "" {
@@ -2034,16 +2090,17 @@ func (cli *DockerCli) createContainer(config *runconfig.Config, hostConfig *runc
 	}
 
 	//create the container
-	stream, statusCode, err := cli.call("POST", "/containers/create?"+containerValues.Encode(), data, false)
+	stream, statusCode, err := cli.call("POST", "/containers/create?"+containerValues.Encode(), mergedConfig, false)
 	//if image not found try to pull it
 	if statusCode == 404 {
 		fmt.Fprintf(cli.err, "Unable to find image '%s' locally\n", config.Image)
 
-		if err = cli.pullImage(config.Image); err != nil {
+		// we don't want to write to stdout anything apart from container.ID
+		if err = cli.pullImageCustomOut(config.Image, cli.err); err != nil {
 			return nil, err
 		}
 		// Retry
-		if stream, _, err = cli.call("POST", "/containers/create?"+containerValues.Encode(), data, false); err != nil {
+		if stream, _, err = cli.call("POST", "/containers/create?"+containerValues.Encode(), mergedConfig, false); err != nil {
 			return nil, err
 		}
 	} else if err != nil {
@@ -2139,13 +2196,13 @@ func (cli *DockerCli) CmdRun(args ...string) error {
 		config.StdinOnce = false
 	}
 
-	// Disable flSigProxy in case on TTY
+	// Disable flSigProxy when in TTY mode
 	sigProxy := *flSigProxy
 	if config.Tty {
 		sigProxy = false
 	}
 
-	runResult, err := cli.createContainer(config, nil, hostConfig.ContainerIDFile, *flName)
+	runResult, err := cli.createContainer(config, hostConfig, hostConfig.ContainerIDFile, *flName)
 	if err != nil {
 		return err
 	}
@@ -2161,7 +2218,7 @@ func (cli *DockerCli) CmdRun(args ...string) error {
 	)
 
 	if !config.AttachStdout && !config.AttachStderr {
-		// Make this asynchrone in order to let the client write to stdin before having to read the ID
+		// Make this asynchronous to allow the client to write to stdin before having to read the ID
 		waitDisplayId = make(chan struct{})
 		go func() {
 			defer close(waitDisplayId)
@@ -2173,7 +2230,7 @@ func (cli *DockerCli) CmdRun(args ...string) error {
 		return ErrConflictRestartPolicyAndAutoRemove
 	}
 
-	// We need to instanciate the chan because the select needs it. It can
+	// We need to instantiate the chan because the select needs it. It can
 	// be closed but can't be uninitialized.
 	hijacked := make(chan io.Closer)
 
@@ -2210,7 +2267,7 @@ func (cli *DockerCli) CmdRun(args ...string) error {
 			}
 		}
 
-		errCh = utils.Go(func() error {
+		errCh = promise.Go(func() error {
 			return cli.hijack("POST", "/containers/"+runResult.Get("Id")+"/attach?"+v.Encode(), config.Tty, in, out, stderr, hijacked, nil)
 		})
 	} else {
@@ -2220,8 +2277,8 @@ func (cli *DockerCli) CmdRun(args ...string) error {
 	// Acknowledge the hijack before starting
 	select {
 	case closer := <-hijacked:
-		// Make sure that hijack gets closed when returning. (result
-		// in closing hijack chan and freeing server's goroutines.
+		// Make sure that the hijack gets closed when returning (results
+		// in closing the hijack chan and freeing server's goroutines)
 		if closer != nil {
 			defer closer.Close()
 		}
@@ -2237,7 +2294,7 @@ func (cli *DockerCli) CmdRun(args ...string) error {
 		return err
 	}
 
-	if (config.AttachStdin || config.AttachStdout || config.AttachStderr) && config.Tty && cli.isTerminal {
+	if (config.AttachStdin || config.AttachStdout || config.AttachStderr) && config.Tty && cli.isTerminalOut {
 		if err := cli.monitorTtySize(runResult.Get("Id"), false); err != nil {
 			log.Errorf("Error monitoring TTY size: %s", err)
 		}
@@ -2273,15 +2330,15 @@ func (cli *DockerCli) CmdRun(args ...string) error {
 			return err
 		}
 	} else {
+		// No Autoremove: Simply retrieve the exit code
 		if !config.Tty {
-			// In non-tty mode, we can't dettach, so we know we need to wait.
+			// In non-TTY mode, we can't detach, so we must wait for container exit
 			if status, err = waitForExit(cli, runResult.Get("Id")); err != nil {
 				return err
 			}
 		} else {
-			// In TTY mode, there is a race. If the process dies too slowly, the state can be update after the getExitCode call
-			// and result in a wrong exit code.
-			// No Autoremove: Simply retrieve the exit code
+			// In TTY mode, there is a race: if the process dies too slowly, the state could
+			// be updated after the getExitCode call and result in the wrong exit code being reported
 			if _, status, err = getExitCode(cli, runResult.Get("Id")); err != nil {
 				return err
 			}
@@ -2355,7 +2412,10 @@ func (cli *DockerCli) CmdSave(args ...string) error {
 		if err != nil {
 			return err
 		}
+	} else if cli.isTerminalOut {
+		return errors.New("Cowardly refusing to save to a terminal. Use the -o flag or redirect.")
 	}
+
 	if len(cmd.Args()) == 1 {
 		image := cmd.Arg(0)
 		if err := cli.stream("GET", "/images/"+image+"/get", nil, output, nil); err != nil {
@@ -2467,7 +2527,7 @@ func (cli *DockerCli) CmdExec(args ...string) error {
 			stderr = cli.err
 		}
 	}
-	errCh = utils.Go(func() error {
+	errCh = promise.Go(func() error {
 		return cli.hijack("POST", "/exec/"+execID+"/start", execConfig.Tty, in, out, stderr, hijacked, execConfig)
 	})
 
@@ -2486,7 +2546,7 @@ func (cli *DockerCli) CmdExec(args ...string) error {
 		}
 	}
 
-	if execConfig.Tty && cli.isTerminal {
+	if execConfig.Tty && cli.isTerminalIn {
 		if err := cli.monitorTtySize(execID, true); err != nil {
 			log.Errorf("Error monitoring TTY size: %s", err)
 		}

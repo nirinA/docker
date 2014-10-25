@@ -49,6 +49,10 @@ unix://[/path/to/socket] to use.
 **-g**=""
   Path to use as the root of the Docker runtime. Default is `/var/lib/docker`.
 
+
+**--fixed-cidr**=""
+  IPv4 subnet for fixed IPs (ex: 10.20.0.0/16); this subnet must be nested in the bridge subnet (which is defined by \-b or \-\-bip)
+
 **--icc**=*true*|*false*
   Enable inter\-container communication. Default is true.
 
@@ -102,7 +106,7 @@ unix://[/path/to/socket] to use.
   Get real time events from the server
 
 **docker-exec(1)**
-  Run a command in an active container
+  Run a command in a running container
 
 **docker-export(1)**
   Stream the contents of a container as a tar archive

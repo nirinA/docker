@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net"
+	"os"
 	"strings"
 	"sync"
 
@@ -84,6 +85,7 @@ func InitDriver(job *engine.Job) engine.Status {
 		ipMasq         = job.GetenvBool("EnableIpMasq")
 		ipForward      = job.GetenvBool("EnableIpForward")
 		bridgeIP       = job.Getenv("BridgeIP")
+		fixedCIDR      = job.Getenv("FixedCIDR")
 	)
 
 	if defaultIP := job.Getenv("DefaultBindingIP"); defaultIP != "" {
@@ -103,8 +105,8 @@ func InitDriver(job *engine.Job) engine.Status {
 		if !usingDefaultBridge {
 			return job.Error(err)
 		}
-		// If the iface is not found, try to create it
-		if err := createBridge(bridgeIP); err != nil {
+		// If the bridge interface is not found (or has no address), try to create it and/or add an address
+		if err := configureBridge(bridgeIP); err != nil {
 			return job.Error(err)
 		}
 
@@ -155,6 +157,16 @@ func InitDriver(job *engine.Job) engine.Status {
 	}
 
 	bridgeNetwork = network
+	if fixedCIDR != "" {
+		_, subnet, err := net.ParseCIDR(fixedCIDR)
+		if err != nil {
+			return job.Error(err)
+		}
+		log.Debugf("Subnet: %v", subnet)
+		if err := ipallocator.RegisterSubnet(bridgeNetwork, subnet); err != nil {
+			return job.Error(err)
+		}
+	}
 
 	// https://github.com/docker/docker/issues/2768
 	job.Eng.Hack_SetGlobalVar("httpapi.bridgeIP", bridgeNetwork.IP)
@@ -240,10 +252,12 @@ func setupIPTables(addr net.Addr, icc, ipmasq bool) error {
 	return nil
 }
 
-// CreateBridgeIface creates a network bridge interface on the host system with the name `ifaceName`,
-// and attempts to configure it with an address which doesn't conflict with any other interface on the host.
-// If it can't find an address which doesn't conflict, it will return an error.
-func createBridge(bridgeIP string) error {
+// configureBridge attempts to create and configure a network bridge interface named `ifaceName` on the host
+// If bridgeIP is empty, it will try to find a non-conflicting IP from the Docker-specified private ranges
+// If the bridge `ifaceName` already exists, it will only perform the IP address association with the existing
+// bridge (fixes issue #8444)
+// If an address which doesn't conflict with existing interfaces can't be found, an error is returned.
+func configureBridge(bridgeIP string) error {
 	nameservers := []string{}
 	resolvConf, _ := resolvconf.Get()
 	// we don't check for an error here, because we don't really care
@@ -284,7 +298,10 @@ func createBridge(bridgeIP string) error {
 	log.Debugf("Creating bridge %s with network %s", bridgeIface, ifaceAddr)
 
 	if err := createBridgeIface(bridgeIface); err != nil {
-		return err
+		// the bridge may already exist, therefore we can ignore an "exists" error
+		if !os.IsExist(err) {
+			return err
+		}
 	}
 
 	iface, err := net.InterfaceByName(bridgeIface)
@@ -315,17 +332,43 @@ func createBridgeIface(name string) error {
 	return netlink.CreateBridge(name, setBridgeMacAddr)
 }
 
+// Generate a IEEE802 compliant MAC address from the given IP address.
+//
+// The generator is guaranteed to be consistent: the same IP will always yield the same
+// MAC address. This is to avoid ARP cache issues.
+func generateMacAddr(ip net.IP) net.HardwareAddr {
+	hw := make(net.HardwareAddr, 6)
+
+	// The first byte of the MAC address has to comply with these rules:
+	// 1. Unicast: Set the least-significant bit to 0.
+	// 2. Address is locally administered: Set the second-least-significant bit (U/L) to 1.
+	// 3. As "small" as possible: The veth address has to be "smaller" than the bridge address.
+	hw[0] = 0x02
+
+	// The first 24 bits of the MAC represent the Organizationally Unique Identifier (OUI).
+	// Since this address is locally administered, we can do whatever we want as long as
+	// it doesn't conflict with other addresses.
+	hw[1] = 0x42
+
+	// Insert the IP address into the last 32 bits of the MAC address.
+	// This is a simple way to guarantee the address will be consistent and unique.
+	copy(hw[2:], ip.To4())
+
+	return hw
+}
+
 // Allocate a network interface
 func Allocate(job *engine.Job) engine.Status {
 	var (
-		ip          *net.IP
+		ip          net.IP
+		mac         net.HardwareAddr
 		err         error
 		id          = job.Args[0]
 		requestedIP = net.ParseIP(job.Getenv("RequestedIP"))
 	)
 
 	if requestedIP != nil {
-		ip, err = ipallocator.RequestIP(bridgeNetwork, &requestedIP)
+		ip, err = ipallocator.RequestIP(bridgeNetwork, requestedIP)
 	} else {
 		ip, err = ipallocator.RequestIP(bridgeNetwork, nil)
 	}
@@ -333,17 +376,23 @@ func Allocate(job *engine.Job) engine.Status {
 		return job.Error(err)
 	}
 
+	// If no explicit mac address was given, generate a random one.
+	if mac, err = net.ParseMAC(job.Getenv("RequestedMac")); err != nil {
+		mac = generateMacAddr(ip)
+	}
+
 	out := engine.Env{}
 	out.Set("IP", ip.String())
 	out.Set("Mask", bridgeNetwork.Mask.String())
 	out.Set("Gateway", bridgeNetwork.IP.String())
+	out.Set("MacAddress", mac.String())
 	out.Set("Bridge", bridgeIface)
 
 	size, _ := bridgeNetwork.Mask.Size()
 	out.SetInt("IPPrefixLen", size)
 
 	currentInterfaces.Set(id, &networkInterface{
-		IP: *ip,
+		IP: ip,
 	})
 
 	out.WriteTo(job.Stdout)
@@ -368,7 +417,7 @@ func Release(job *engine.Job) engine.Status {
 		}
 	}
 
-	if err := ipallocator.ReleaseIP(bridgeNetwork, &containerInterface.IP); err != nil {
+	if err := ipallocator.ReleaseIP(bridgeNetwork, containerInterface.IP); err != nil {
 		log.Infof("Unable to release ip %s", err)
 	}
 	return engine.StatusOK
@@ -390,6 +439,9 @@ func AllocatePort(job *engine.Job) engine.Status {
 
 	if hostIP != "" {
 		ip = net.ParseIP(hostIP)
+		if ip == nil {
+			return job.Errorf("Bad parameter: invalid host ip %s", hostIP)
+		}
 	}
 
 	// host ip, proto, and host port

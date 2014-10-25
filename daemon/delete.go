@@ -20,7 +20,7 @@ func (daemon *Daemon) ContainerRm(job *engine.Job) engine.Status {
 	container := daemon.Get(name)
 
 	if container == nil {
-		job.Errorf("No such container: %s", name)
+		return job.Errorf("No such container: %s", name)
 	}
 
 	if removeLink {
@@ -113,6 +113,10 @@ func (daemon *Daemon) Destroy(container *Container) error {
 
 	if err := os.RemoveAll(container.root); err != nil {
 		return fmt.Errorf("Unable to remove filesystem for %v: %v", container.ID, err)
+	}
+
+	if err := daemon.execDriver.Clean(container.ID); err != nil {
+		return fmt.Errorf("Unable to remove execdriver data for %s: %s", container.ID, err)
 	}
 
 	selinuxFreeLxcContexts(container.ProcessLabel)

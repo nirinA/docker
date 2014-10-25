@@ -79,15 +79,6 @@ func cleanup(eng *engine.Engine, t *testing.T) error {
 	return nil
 }
 
-func layerArchive(tarfile string) (io.Reader, error) {
-	// FIXME: need to close f somewhere
-	f, err := os.Open(tarfile)
-	if err != nil {
-		return nil, err
-	}
-	return f, nil
-}
-
 func init() {
 	// Always use the same driver (vfs) for all integration tests.
 	// To test other drivers, we need a dedicated driver validation suite.
@@ -266,6 +257,7 @@ func TestDaemonCreate(t *testing.T) {
 		Image: GetTestImage(daemon).ID,
 		Cmd:   []string{"ls", "-al"},
 	},
+		&runconfig.HostConfig{},
 		"",
 	)
 	if err != nil {
@@ -309,14 +301,15 @@ func TestDaemonCreate(t *testing.T) {
 			Image: GetTestImage(daemon).ID,
 			Cmd:   []string{"ls", "-al"},
 		},
+		&runconfig.HostConfig{},
 		"conflictname",
 	)
-	if _, _, err := daemon.Create(&runconfig.Config{Image: GetTestImage(daemon).ID, Cmd: []string{"ls", "-al"}}, testContainer.Name); err == nil || !strings.Contains(err.Error(), utils.TruncateID(testContainer.ID)) {
+	if _, _, err := daemon.Create(&runconfig.Config{Image: GetTestImage(daemon).ID, Cmd: []string{"ls", "-al"}}, &runconfig.HostConfig{}, testContainer.Name); err == nil || !strings.Contains(err.Error(), utils.TruncateID(testContainer.ID)) {
 		t.Fatalf("Name conflict error doesn't include the correct short id. Message was: %s", err.Error())
 	}
 
 	// Make sure create with bad parameters returns an error
-	if _, _, err = daemon.Create(&runconfig.Config{Image: GetTestImage(daemon).ID}, ""); err == nil {
+	if _, _, err = daemon.Create(&runconfig.Config{Image: GetTestImage(daemon).ID}, &runconfig.HostConfig{}, ""); err == nil {
 		t.Fatal("Builder.Create should throw an error when Cmd is missing")
 	}
 
@@ -325,6 +318,7 @@ func TestDaemonCreate(t *testing.T) {
 			Image: GetTestImage(daemon).ID,
 			Cmd:   []string{},
 		},
+		&runconfig.HostConfig{},
 		"",
 	); err == nil {
 		t.Fatal("Builder.Create should throw an error when Cmd is empty")
@@ -335,7 +329,7 @@ func TestDaemonCreate(t *testing.T) {
 		Cmd:       []string{"/bin/ls"},
 		PortSpecs: []string{"80"},
 	}
-	container, _, err = daemon.Create(config, "")
+	container, _, err = daemon.Create(config, &runconfig.HostConfig{}, "")
 
 	_, err = daemon.Commit(container, "testrepo", "testtag", "", "", true, config)
 	if err != nil {
@@ -348,6 +342,7 @@ func TestDaemonCreate(t *testing.T) {
 		Cmd:       []string{"ls", "-al"},
 		PortSpecs: []string{"80:8000"},
 	},
+		&runconfig.HostConfig{},
 		"",
 	)
 	if err != nil {
@@ -365,7 +360,9 @@ func TestDestroy(t *testing.T) {
 	container, _, err := daemon.Create(&runconfig.Config{
 		Image: GetTestImage(daemon).ID,
 		Cmd:   []string{"ls", "-al"},
-	}, "")
+	},
+		&runconfig.HostConfig{},
+		"")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -857,7 +854,9 @@ func TestDestroyWithInitLayer(t *testing.T) {
 	container, _, err := daemon.Create(&runconfig.Config{
 		Image: GetTestImage(daemon).ID,
 		Cmd:   []string{"ls", "-al"},
-	}, "")
+	},
+		&runconfig.HostConfig{},
+		"")
 
 	if err != nil {
 		t.Fatal(err)

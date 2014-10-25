@@ -88,9 +88,8 @@ func (daemon *Daemon) ContainerLogs(job *engine.Job) engine.Status {
 				cLog = tmp
 			}
 			dec := json.NewDecoder(cLog)
+			l := &jsonlog.JSONLog{}
 			for {
-				l := &jsonlog.JSONLog{}
-
 				if err := dec.Decode(l); err == io.EOF {
 					break
 				} else if err != nil {
@@ -102,11 +101,12 @@ func (daemon *Daemon) ContainerLogs(job *engine.Job) engine.Status {
 					logLine = fmt.Sprintf("%s %s", l.Created.Format(format), logLine)
 				}
 				if l.Stream == "stdout" && stdout {
-					fmt.Fprintf(job.Stdout, "%s", logLine)
+					io.WriteString(job.Stdout, logLine)
 				}
 				if l.Stream == "stderr" && stderr {
-					fmt.Fprintf(job.Stderr, "%s", logLine)
+					io.WriteString(job.Stderr, logLine)
 				}
+				l.Reset()
 			}
 		}
 	}
@@ -114,12 +114,14 @@ func (daemon *Daemon) ContainerLogs(job *engine.Job) engine.Status {
 		errors := make(chan error, 2)
 		if stdout {
 			stdoutPipe := container.StdoutLogPipe()
+			defer stdoutPipe.Close()
 			go func() {
 				errors <- jsonlog.WriteLog(stdoutPipe, job.Stdout, format)
 			}()
 		}
 		if stderr {
 			stderrPipe := container.StderrLogPipe()
+			defer stderrPipe.Close()
 			go func() {
 				errors <- jsonlog.WriteLog(stderrPipe, job.Stderr, format)
 			}()
